@@ -867,10 +867,10 @@ where
     }
 
     /// Minimum number of blocks that must pass between staking actions on the same bond.
-    pub const STAKING_ACTION_DELAY_BLOCKS: u32 = 75;
+    pub const STAKING_ACTION_DELAY_BLOCKS: u32 = 5;
 
     /// The period length for staking days. A new staking day starts every N blocks.
-    pub const STAKING_DAY_PERIOD: u32 = 150;
+    pub const STAKING_DAY_PERIOD: u32 = 30;
 
     /// The window size within each staking day period where staking actions are allowed.
     /// Staking actions are only valid when `block_height % STAKING_DAY_PERIOD < STAKING_DAY_WINDOW`.
@@ -907,11 +907,12 @@ where
         // Query the state for bond info
         let query = state.oneshot(zs::Request::BondInfo(bond_key));
 
-        let response = query
-            .await
-            .map_err(|e| TransactionError::ValidateMempoolLockTimeError(
-                format!("failed to query bond info: {}", e)
-            ))?;
+        let response = query.await.map_err(|e| {
+            TransactionError::ValidateMempoolLockTimeError(format!(
+                "failed to query bond info: {}",
+                e
+            ))
+        })?;
 
         let zs::Response::BondInfo(bond_info) = response else {
             unreachable!("BondInfo request always responds with BondInfo")

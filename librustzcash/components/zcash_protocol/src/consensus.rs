@@ -140,6 +140,12 @@ pub enum NetworkType {
     Regtest,
 }
 
+impl Default for NetworkType {
+    fn default() -> Self {
+        NetworkType::Test
+    }
+}
+
 #[cfg(feature = "std")]
 memuse::impl_no_dynamic_usage!(NetworkType);
 

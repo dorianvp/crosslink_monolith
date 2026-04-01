@@ -82,6 +82,7 @@ use tokio::{pin, select, sync::oneshot, time::timeout};
 use tower::{builder::ServiceBuilder, util::BoxService, ServiceExt};
 use tracing_futures::Instrument;
 
+use zcash_protocol::consensus::NetworkType;
 use zebra_chain::block::genesis::regtest_genesis_block;
 use zebra_consensus::{router::BackgroundTaskHandles, ParameterCheckpoint};
 use zebra_rpc::{methods::RpcImpl, server::RpcServer, SubmitBlockChannel};
@@ -114,15 +115,20 @@ pub struct StartCmd {
 
 impl StartCmd {
     async fn start(&self) -> Result<(), Report> {
+        let config = APPLICATION.config();
+        let is_regtest = config.network.network.is_regtest();
+        let selected_network: NetworkType = match is_regtest {
+            true => NetworkType::Regtest,
+            false => NetworkType::Test,
+        };
 
         #[cfg(not(feature = "viz_gui"))]
         {
-            let wallet_state = Arc::new(std::sync::Mutex::new(wallet::WalletState::new()));
+            let wallet_state = Arc::new(std::sync::Mutex::new(
+                wallet::WalletState::new_with_network(selected_network.clone()),
+            ));
             tokio::spawn(zebra_crosslink::wallet::wallet_main(wallet_state));
         }
-
-        let config = APPLICATION.config();
-        let is_regtest = config.network.network.is_regtest();
 
         let config = if is_regtest {
             fn add_to_port(mut addr: std::net::SocketAddr, addend: u16) -> std::net::SocketAddr {
@@ -164,8 +170,8 @@ impl StartCmd {
 
         // workshop-specific key seed
         let global_seed = loop {
-            use std::{fs::File, io::Read, io::Write};
             use rand::Rng;
+            use std::{fs::File, io::Read, io::Write};
 
             let mut key_path = config.state.cache_dir.clone();
             let _ = std::fs::create_dir_all(key_path.clone());
@@ -176,27 +182,32 @@ impl StartCmd {
             if let Ok(mut f) = File::open(key_path.clone()) {
                 match f.read_exact(&mut seed) {
                     Ok(()) => break seed,
-                    Err(err) => warn!("couldn't read seed at {key_path:?} ({err:?}); creating a new one"),
+                    Err(err) => {
+                        warn!("couldn't read seed at {key_path:?} ({err:?}); creating a new one")
+                    }
                 }
             }
 
             // all else failed, create/replace file from scratch
             seed = rand::thread_rng().gen();
-            let mut f = File::create(key_path).expect("couldn't create seed file; add one manually");
-            f.write(&seed).expect("couldn't write to seed file; add one manually");
+            let mut f =
+                File::create(key_path).expect("couldn't create seed file; add one manually");
+            f.write(&seed)
+                .expect("couldn't write to seed file; add one manually");
 
             break seed;
         };
         *wallet::GLOBAL_SEED.lock().unwrap() = Some(global_seed);
 
-        let path_to_pos_store_file = if config.state.ephemeral { std::path::PathBuf::new() } else {
+        let path_to_pos_store_file = if config.state.ephemeral {
+            std::path::PathBuf::new()
+        } else {
             let mut key_path = config.state.cache_dir.clone();
             let _ = std::fs::create_dir_all(key_path.clone());
 
             key_path.push("pos.chain");
             key_path
         };
-
 
         info!("initializing node state");
         let (_, max_checkpoint_height) = zebra_consensus::router::init_checkpoint_list(
@@ -206,7 +217,9 @@ impl StartCmd {
 
         info!("opening database, this may take a few minutes");
 
-        let actual_closure: Arc<std::sync::Mutex<Option<zebra_state::ClosureToCallIntoCrosslinkFromState>>> = Arc::new(std::sync::Mutex::new(None));
+        let actual_closure: Arc<
+            std::sync::Mutex<Option<zebra_state::ClosureToCallIntoCrosslinkFromState>>,
+        > = Arc::new(std::sync::Mutex::new(None));
         let actual_closure2 = Arc::clone(&actual_closure);
 
         let (state_service, read_only_state_service, latest_chain_tip, chain_tip_change) =
@@ -279,8 +292,13 @@ impl StartCmd {
             let state_config_copy = Arc::clone(&config);
             let sync_state = state.clone();
             let sync_read_state = read_only_state_service.clone();
-            tokio::task::spawn_blocking(move ||{
-                zebra_state::new_network::sync(&state_config_copy.state, sync_read_state, sync_state, tokio::runtime::Handle::current())
+            tokio::task::spawn_blocking(move || {
+                zebra_state::new_network::sync(
+                    &state_config_copy.state,
+                    sync_read_state,
+                    sync_state,
+                    tokio::runtime::Handle::current(),
+                )
             });
         }
 
@@ -361,7 +379,14 @@ impl StartCmd {
                 }),
                 Arc::new(move |req| {
                     let read_only_state_service = read_only_state_service.clone();
-                    Box::pin(async move { read_only_state_service.clone().ready().await?.call(req).await })
+                    Box::pin(async move {
+                        read_only_state_service
+                            .clone()
+                            .ready()
+                            .await?
+                            .call(req)
+                            .await
+                    })
                 }),
                 Arc::new(move |req| {
                     let mempool = mempool2.clone();
@@ -650,16 +675,28 @@ impl StartCmd {
             let zaino_config = zainodlib::config::ZainodConfig {
                 backend: zaino_state::BackendType::Fetch,
                 json_server_settings: Some(zaino_serve::server::config::JsonRpcServerConfig {
-                    json_rpc_listen_address: std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), zebra_port_base + 10000),
+                    json_rpc_listen_address: std::net::SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+                        zebra_port_base + 10000,
+                    ),
                     cookie_dir: None,
                 }),
                 grpc_settings: zaino_serve::server::config::GrpcServerConfig {
-                    listen_address: std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)), zebra_port_base + 10001),
+                    listen_address: std::net::SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+                        zebra_port_base + 10001,
+                    ),
                     tls: None,
                 },
                 validator_settings: zaino_common::ValidatorConfig {
-                    validator_grpc_listen_address: std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), zebra_port_base-1),
-                    validator_jsonrpc_listen_address: std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), zebra_port_base-1),
+                    validator_grpc_listen_address: std::net::SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+                        zebra_port_base - 1,
+                    ),
+                    validator_jsonrpc_listen_address: std::net::SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+                        zebra_port_base - 1,
+                    ),
                     validator_cookie_path: None,
                     validator_user: Some("xxxxxx".to_owned()),
                     validator_password: Some("xxxxxx".to_owned()),
@@ -692,9 +729,13 @@ impl StartCmd {
                     nu7: None,
                 }),
             };
-            *zebra_crosslink::wallet::wallet_main_zaino_port.lock().unwrap() = zebra_port_base + 10001;
+            *zebra_crosslink::wallet::wallet_main_zaino_port
+                .lock()
+                .unwrap() = zebra_port_base + 10001;
 
-            zainodlib::indexer::spawn_indexer(zaino_config).await.unwrap();
+            zainodlib::indexer::spawn_indexer(zaino_config)
+                .await
+                .unwrap();
         }
 
         // Wait for tasks to finish

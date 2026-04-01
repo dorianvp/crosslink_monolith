@@ -15,6 +15,7 @@ use abscissa_core::{
 use semver::{BuildMetadata, Version};
 
 use tokio::sync::watch;
+use zcash_protocol::consensus::NetworkType;
 use zebra_chain::{
     block::Height,
     parameters::{testnet, Magic},
@@ -242,8 +243,10 @@ impl Application for ZebradApp {
                         .cache_dir
                         .push("zebra_crosslink_workshop_january_cache_delete_me");
 
-                    c.crosslink.bft_peers =
-                        vec!["70.34.201.202:8234".to_owned(), "45.76.30.90:8234".to_owned()];
+                    c.crosslink.bft_peers = vec![
+                        "70.34.201.202:8234".to_owned(),
+                        "45.76.30.90:8234".to_owned(),
+                    ];
 
                     c.consensus.checkpoint_sync = false;
                 }
@@ -617,11 +620,20 @@ impl Application for ZebradApp {
 /// command-line arguments, and terminating when complete.
 // <https://docs.rs/abscissa_core/0.7.0/src/abscissa_core/application.rs.html#174-178>
 pub fn boot(app_cell: &'static AppCell<ZebradApp>) -> ! {
-    let args = EntryPoint::process_cli_args(env::args_os().collect()).unwrap_or_else(|err| err.exit());
+    let args =
+        EntryPoint::process_cli_args(env::args_os().collect()).unwrap_or_else(|err| err.exit());
+
+    let is_regtest = true;
+    let selected_network: NetworkType = match is_regtest {
+        true => NetworkType::Regtest,
+        false => NetworkType::Test,
+    };
 
     #[cfg(feature = "viz_gui")]
     {
-        let wallet_state = Arc::new(std::sync::Mutex::new(wallet::WalletState::new()));
+        let wallet_state = Arc::new(std::sync::Mutex::new(
+            wallet::WalletState::new_with_network(selected_network.clone()),
+        ));
         let wallet_state2 = wallet_state.clone();
 
         std::thread::spawn(move || {
